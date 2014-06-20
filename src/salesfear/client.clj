@@ -1,12 +1,11 @@
 (ns salesfear.client
-  (:refer-clojure :exclude (get find))
-  (:use [clojure.string :only [join split escape]]
-        [slingshot.slingshot :only [throw+ try+]])
+  (:require [clojure.string :refer [join split escape]]
+            [slingshot.slingshot :refer [throw+ try+]])
   (:import (java.net URL)
-           (com.teamlazerbeez.crm.sf.core SObject
-                                          Id)
+           (com.teamlazerbeez.crm.sf.core SObject Id)
            (com.teamlazerbeez.crm.sf.soap ConnectionPoolImpl)
-           (com.teamlazerbeez.crm.sf.rest RestConnectionPoolImpl)))
+           (com.teamlazerbeez.crm.sf.rest RestConnectionPoolImpl RestConnectionImpl RestQueryLocator HttpApiClient)
+           (com.fasterxml.jackson.databind.exc UnrecognizedPropertyException)))
 
 ; Records
 (defrecord CSObject [type id]
@@ -19,12 +18,11 @@
                                   (when-not (or (= :type k)
                                                 (= :id k))
                                     [(name k) v]))))
-  ; Fuck mutability
   (setField [this k v] (throw RuntimeException))
   (setAllFields [this m] (throw RuntimeException))
   (removeField [this k] (throw RuntimeException)))
 
-(defn sobject 
+(defn sobject
   "Creates an immutable CSObject. Can take an SObject, or a type, id, and map
   of fields to values. Ids will be converted to Id objects, types will be
   converted to strings. (sobject nil) is nil."
@@ -41,7 +39,7 @@
          [(keyword k) v])))))
 
 ; Misc stuff
-(def client-id "joanna")
+(def client-id "")
 (def cache-default {:sobject-field-names {}})
 (def ^:dynamic cache (atom cache-default))
 
@@ -65,16 +63,22 @@
     (doto (RestConnectionPoolImpl.)
       (.configureOrg org-id host token))))
 
-(defmacro salesforce 
+(defn rest-pool-oauth
+  "Returns a REST connection pool from an OAuth token"
+  [{:keys [org-id host token]}]
+  (doto (RestConnectionPoolImpl.)
+    (.configureOrg org-id host token)))
+
+(defmacro salesforce
   "Executes exprs with implicit credentials, organization, etc. Opts:
   :username  SF username
   :password  SF password
   :orgid     Organization ID
   :threads   Maximum number of concurrent operations"
   [opts & exprs]
-  `(let [soap-pool# (soap-pool ~(:org-id opts) 
-                               ~(:username opts) 
-                               ~(:password opts) 
+  `(let [soap-pool# (soap-pool ~(:org-id opts)
+                               ~(:username opts)
+                               ~(:password opts)
                                ~(or (:threads opts) 8))
          rest-pool# (rest-pool soap-pool# ~(:org-id opts))]
      (binding [cache       (atom cache-default)
@@ -87,9 +91,9 @@
   "Like (salesforce), but redefines local vars destructively. Useful for REPL
   testing."
   [opts]
-  (let [soap-pool (soap-pool (:org-id opts) 
-                             (:username opts) 
-                             (:password opts) 
+  (let [soap-pool (soap-pool (:org-id opts)
+                             (:username opts)
+                             (:password opts)
                              (or (:threads opts) 8))
         rest-pool (rest-pool soap-pool (:org-id opts))]
     (def ^:dynamic cache (atom cache-default))
@@ -97,6 +101,27 @@
     (def ^:dynamic *rest-pool* rest-pool)
     (def ^:dynamic *org-id* (:org-id opts))))
 
+(defmacro salesforce-oauth
+  "Executes exprs with implicit credentials, organization, etc. Opts:
+  :orgid     Organization ID
+  :host      SalesForce url
+  :token     SalesForce OAuth Token
+  :threads   Maximum number of concurrent operations"
+  [opts & exprs]
+  `(let [rest-pool# (rest-pool-oauth ~opts)]
+     (binding [cache       (atom cache-default)
+               *rest-pool* rest-pool#
+               *org-id*    ~(:org-id opts)]
+       ~@exprs)))
+
+(defn salesforce-oauth!
+  "Like (salesforce-oauth), but redefines local vars destructively. Useful for REPL
+  testing."
+  [opts]
+  (let [rest-pool (rest-pool-oauth opts)]
+    (def ^:dynamic cache (atom cache-default))
+    (def ^:dynamic *rest-pool* rest-pool)
+    (def ^:dynamic *org-id* (:org-id opts))))
 
 (defn rest-conn []
   (.getRestConnection *rest-pool* *org-id*))
@@ -134,11 +159,11 @@
   [string]
   (str "'" (escape string {\' "\\'"}) "'"))
 
-(defn soql-literal 
+(defn soql-literal
   "Returns SOQL string fragments for values. Strings are quoted, keywords are
   not quoted, numbers are converted with (str), true, false, and nil are
   \"true\", \"false\", and \"null\".
-  
+
   I haven't actually verified soql's syntax, so this could bite you. :-D"
   [x]
   (cond (nil? x) "null"
@@ -178,7 +203,48 @@
         sobjects (map sobject (.getSObjects res))]
     (vary-meta sobjects merge {:done (.isDone res)
                                :total (.getTotalSize res)
-                               :query-locator (.getQueryLocator res)})))
+                               :query-locator (.getQueryLocator res)
+                               :completed-queries 1})
+    res))
+
+(defn done?
+  "Returns whether a response contains more results"
+  [query-response]
+  (-> query-response meta :done))
+
+(defn get-query-locator
+  "Returns the RestQueryLocator from a query response"
+  [query-response]
+  (-> query-response meta :query-locator))
+
+(defn get-completed-queries
+  [query-response]
+  (-> query-response meta :completed-queries))
+
+(defn queryable?
+  [sobject]
+  (try
+    (:queryable (describe-sobject sobject))
+    (catch UnrecognizedPropertyException e
+      (println (str "NO WAY DUDE caught exception " (.getMessage e)))
+      false)))
+
+(defn query-more
+  [^RestQueryLocator query-locator completed-queries]
+  (let [res (-> (rest-conn) (.queryMore query-locator))
+        sobjects (map sobject (.getSObjects res))]
+    (vary-meta sobjects merge {:done (.isDone res)
+                               :total (.getTotalSize res)
+                               :query-locator (.getQueryLocator res)
+                               :completed-queries (inc completed-queries)})))
+
+(defn run-next-query
+  [query-response]
+  (let [done (done? query-response)
+        query-locator (get-query-locator query-response)
+        completed-queries (get-completed-queries query-response)]
+    (when-not done
+      (query-more query-locator completed-queries))))
 
 (defn sobject-field-names
   "Returns a seq of field names on an sobject type."
@@ -214,11 +280,10 @@
      (try+
        (.delete (rest-conn) (name type) id)
        :deleted
-       (catch (and (instance? com.teamlazerbeez.crm.sf.rest.ApiException 
+       (catch (and (instance? com.teamlazerbeez.crm.sf.rest.ApiException
                               (.getCause %))
-                   (= 404 (.getHttpResponseCode (.getCause %)))) e 
-         :already-deleted)))
-   ))
+                   (= 404 (.getHttpResponseCode (.getCause %)))) e
+         :already-deleted)))))
 
 (defn find
   "Finds SObjects of type given constraints, an (inline) map of fields to
@@ -252,7 +317,7 @@
    (let [id (if (string? id) (Id. id) id)]
      (try+
        (sobject (.retrieve (rest-conn) (name type) id fields))
-       (catch (and (instance? com.teamlazerbeez.crm.sf.rest.ApiException 
+       (catch (and (instance? com.teamlazerbeez.crm.sf.rest.ApiException
                               (.getCause %))
                    (= 404 (.getHttpResponseCode (.getCause %)))) e)))))
 
