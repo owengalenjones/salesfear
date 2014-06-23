@@ -204,8 +204,7 @@
     (vary-meta sobjects merge {:done (.isDone res)
                                :total (.getTotalSize res)
                                :query-locator (.getQueryLocator res)
-                               :completed-queries 1})
-    res))
+                               :completed-queries 1})))
 
 (defn done?
   "Returns whether a response contains more results"
@@ -230,13 +229,17 @@
       false)))
 
 (defn query-more
-  [^RestQueryLocator query-locator completed-queries]
-  (let [res (-> (rest-conn) (.queryMore query-locator))
-        sobjects (map sobject (.getSObjects res))]
-    (vary-meta sobjects merge {:done (.isDone res)
-                               :total (.getTotalSize res)
-                               :query-locator (.getQueryLocator res)
-                               :completed-queries (inc completed-queries)})))
+  ([^clojure.lang.LazySeq response]
+   (let [[done query-locator completed-queries] ((juxt done? get-query-locator get-completed-queries) response)]
+     (when-not done
+       (query-more query-locator completed-queries))))
+  ([^RestQueryLocator query-locator completed-queries]
+   (let [res (-> (rest-conn) (.queryMore query-locator))
+         sobjects (map sobject (.getSObjects res))]
+     (vary-meta sobjects merge {:done (.isDone res)
+                                :total (.getTotalSize res)
+                                :query-locator (.getQueryLocator res)
+                                :completed-queries (inc completed-queries)}))))
 
 (defn run-next-query
   [query-response]
