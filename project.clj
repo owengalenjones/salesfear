@@ -1,4 +1,4 @@
-(defproject salesfear "0.1.1-SNAPSHOT"
+(defproject salesfear "0.2.0-SNAPSHOT"
   :description "Talk to the Salesforce API, via teamlazerbeez sf-api-connector."
   :url "http://github.com/aphyr/salesfear"
   :license {:name "Eclipse Public License"
