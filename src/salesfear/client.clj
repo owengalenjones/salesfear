@@ -207,7 +207,7 @@
                                :completed-queries 1})))
 
 (defn done?
-  "Returns whether a response contains more results"
+  "True if the response is the final response, false if there are more results to query."
   [query-response]
   (-> query-response meta :done))
 
@@ -225,7 +225,7 @@
   (try
     (:queryable (describe-sobject sobject))
     (catch UnrecognizedPropertyException e
-      (println (str "NO WAY DUDE caught exception " (.getMessage e)))
+      (println (str "Caught exception " (.getMessage e)))
       false)))
 
 (defn query-more
